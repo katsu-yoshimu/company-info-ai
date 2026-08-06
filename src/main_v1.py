@@ -3,7 +3,11 @@ Company Intelligence Extractor CLI
 
 AI (Claude, ChatGPT, Gemini) を利用して会社名・住所・電話番号から
 公式ホームページURL、メールアドレス、SNSアカウント情報を取得・抽出するスクリプト。
-Claude/ChatGPT利用時はDuckDuckGo検索を前処理として実行し、最新情報を提供します。
+
+変更点:
+- 入力ファイルを CSV に変更 (DictReader で標準のカンマ区切り解析)
+- 日付入りログファイル名対応 (config.ini のテンプレート設定 + {date} 置換)
+- ログレベルの個別設定対応 (標準出力 / ファイル出力 それぞれのレベルを config から取得)
 """
 
 import abc
@@ -11,29 +15,79 @@ import argparse
 import configparser
 import csv
 import json
+import logging
 import os
 import re
 import sys
+import time
+import datetime
+import traceback
 from typing import Any, Dict, List
 
 
 # ==========================================
-# Web Search Utility (DuckDuckGo)
+# 1. Logger Setup
 # ==========================================
 
-def search_duckduckgo(query: str, max_results: int = 6) -> str:
+def setup_logger(
+    log_file_template: str = "process_{date}.log",
+    console_level_str: str = "INFO",
+    file_level_str: str = "DEBUG"
+) -> logging.Logger:
     """
-    DuckDuckGoを使って指定クエリでWeb検索を行います。
-    SNSアカウントの取りこぼしを防ぐため max_results を 6 件に拡張。
+    標準出力(sys.stdout)とファイルへ同時にログを出力するロガーを設定します。
+    日付入りファイル名および出力レベルを引数で制御します。
     """
-    import time
-    time.sleep(1.5)  # 連続アクセス制限を回避するための待機時間
+    logger = logging.getLogger("company_processor")
+    
+    # ロガー自体のルートレベルは最も低い(詳細な)方に合わせる
+    console_level = getattr(logging, console_level_str.upper(), logging.INFO)
+    file_level = getattr(logging, file_level_str.upper(), logging.DEBUG)
+    logger.setLevel(min(console_level, file_level))
+
+    if logger.hasHandlers():
+        logger.handlers.clear()
+
+    formatter = logging.Formatter(
+        fmt="[%(asctime)s] [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+
+    # 日付文字列 (YYYYMMDD) の生成とファイル名の組み立て
+    today_str = datetime.datetime.now().strftime("%Y%m%d")
+    log_file = log_file_template.format(date=today_str)
+
+    # ① コンソール（標準出力）用ハンドラ
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(console_level)
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+
+    # ② ファイル出力用ハンドラ（UTF-8）
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setLevel(file_level)
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    return logger
+
+
+# ==========================================
+# 2. Web Search Utility (ddgs / DuckDuckGo)
+# ==========================================
+
+def search_duckduckgo(query: str, max_results: int = 5) -> str:
+    """
+    DuckDuckGoを使って指定クエリでWeb検索を行い、テキスト形式で返します。
+    レートリミット（429エラー）回避のため呼び出し前に1.5秒待機します。
+    """
+    time.sleep(1.5)  # レートリミット回避のためのウェイト
     try:
         from ddgs import DDGS
         with DDGS() as ddgs:
             results = list(ddgs.text(query, region="jp-jp", max_results=max_results))
             if not results:
-                return "検索結果なし"
+                return "（該当する検索結果が見つかりませんでした）"
 
             snippets = []
             for item in results:
@@ -43,16 +97,23 @@ def search_duckduckgo(query: str, max_results: int = 6) -> str:
                 snippets.append(f"- タイトル: {title}\n  URL: {url}\n  概要: {body}")
 
             return "\n".join(snippets)
+    except ImportError:
+        logging.getLogger("company_processor").warning(
+            "ddgs パッケージが未インストールです。"
+            " Web検索を行わずにプロンプトを生成します。(pip install ddgs を推奨)"
+        )
+        return "（Web検索ライブラリ未利用）"
     except Exception as err:
-        return f"（検索処理中にエラーが発生しました: {err}）"
+        logging.getLogger("company_processor").warning(f"DuckDuckGo検索処理中にエラーが発生しました: {err}")
+        return f"（検索処理エラー: {err}）"
 
 
 # ==========================================
-# Design Pattern: Strategy Pattern for LLMs
+# 3. Design Pattern: Strategy Pattern for LLMs
 # ==========================================
 
 class BaseLLMClient(abc.ABC):
-    """LLMプロバイダ向けの抽象基底クラス (Strategy Pattern)"""
+    """LLMプロバイダ向けの抽象基底クラス"""
 
     @abc.abstractmethod
     def generate_text(self, prompt: str) -> str:
@@ -155,7 +216,7 @@ class OpenAIClient(BaseLLMClient):
 
 
 class GeminiClient(BaseLLMClient):
-    """Google Gemini API用クライアント (Google検索機能付き)"""
+    """Google Gemini API用クライアント (Google Grounding付き)"""
 
     def __init__(self, api_key: str, model: str):
         """
@@ -202,7 +263,7 @@ class GeminiClient(BaseLLMClient):
 
 
 # ==========================================
-# Design Pattern: Factory Pattern for LLMs
+# 4. Design Pattern: Factory Pattern for LLMs
 # ==========================================
 
 class LLMFactory:
@@ -237,16 +298,17 @@ class LLMFactory:
 
 
 # ==========================================
-# Utility & Main Functions
+# 5. Utility & Processing Functions
 # ==========================================
 
-def load_tsv_file(file_path: str) -> List[Dict[str, str]]:
+def load_csv_file(file_path: str, logger: logging.Logger) -> List[Dict[str, str]]:
     """
-    指定されたTAB形式(TSV)ファイルを読み込んで辞書リストとして返します。
+    指定されたCSV形式(CSV)ファイルを読み込んで辞書リストとして返します。
     列の欠損やNone値が含まれる場合も安全にハンドリングします。
 
     Args:
-        file_path (str): TSVファイルのパス
+        file_path (str): CSVファイルのパス
+        logger (logging.Logger): logger
 
     Returns:
         List[Dict[str, str]]: 会社情報(会社名, 住所, 電話番号)のリスト
@@ -259,17 +321,13 @@ def load_tsv_file(file_path: str) -> List[Dict[str, str]]:
         raise FileNotFoundError(f"指定ファイルが存在しません: {file_path}")
 
     companies = []
-    with open(file_path, mode="r", encoding="utf-8") as file:
-        reader = csv.DictReader(file, delimiter="\t")
+    # UTF-8 (BOM付き含む) に対応するために utf-8-sig を使用
+    with open(file_path, mode="r", encoding="utf-8-sig") as file:
+        reader = csv.DictReader(file)  # デフォルトでカンマ区切り (CSV)
         required_keys = {"company_name", "address", "phone"}
 
-        if (
-            reader.fieldnames is None
-            or not required_keys.issubset(set(reader.fieldnames))
-        ):
-            raise ValueError(
-                f"TSVヘッダーには {required_keys} が必要です。"
-            )
+        if reader.fieldnames is None or not required_keys.issubset(set(reader.fieldnames)):
+            raise ValueError(f"CSVヘッダーには {required_keys} が含まれている必要があります。")
 
         for line_num, row in enumerate(reader, start=2):
             company_name = (row.get("company_name") or "").strip()
@@ -277,9 +335,7 @@ def load_tsv_file(file_path: str) -> List[Dict[str, str]]:
             phone = (row.get("phone") or "").strip()
 
             if not company_name:
-                sys.stderr.write(
-                    f"[WARN] {line_num}行目の会社名を取得できませんでした (スキップします)。\n"
-                )
+                logger.warning(f"{line_num}行目の会社名を取得できませんでした (スキップします)。")
                 continue
 
             companies.append({
@@ -293,46 +349,37 @@ def load_tsv_file(file_path: str) -> List[Dict[str, str]]:
 
 def build_prompt(
     template: str,
-    companies_batch: List[Dict[str, str]],
+    company: Dict[str, str],
     provider: str
 ) -> str:
     """
-    プロンプトテンプレートに会社データおよびWeb検索結果を組み込みます。
-    通常検索に加え、SNS特化検索を実施して取りこぼしを防止します。
+    1社分のデータを基に送信用プロンプトを作成します。
+    Claude/ChatGPTの場合は基本検索とSNS特化検索の結果を追加します。
     """
-    input_data = []
-    perform_web_search = provider in ["claude", "chatgpt", "openai"]
+    item = dict(company)
 
-    for company in companies_batch:
-        item = dict(company)
+    if provider in ["claude", "chatgpt", "openai"]:
+        c_name = company.get("company_name", "")
+        c_addr = company.get("address", "")
 
-        if perform_web_search:
-            c_name = company.get("company_name", "")
-            c_addr = company.get("address", "")
-            
-            # ① 基本検索（HP・メール・全体情報）
-            main_query = f"{c_name} {c_addr} 公式ホームページ メール"
-            main_snippet = search_duckduckgo(main_query, max_results=5)
-            
-            # ② SNS特化検索（Instagram / Facebook / LINE を明記してピンポイント検索）
-            sns_query = f"{c_name} {c_addr} instagram facebook line"
-            sns_snippet = search_duckduckgo(sns_query, max_results=5)
+        main_query = f"{c_name} {c_addr} 公式ホームページ メール"
+        main_snippet = search_duckduckgo(main_query, max_results=5)
 
-            # 両方の検索結果を合成してLLMに渡す
-            item["web_search_results"] = (
-                f"--- [基本検索結果] ---\n{main_snippet}\n\n"
-                f"--- [SNS特化検索結果] ---\n{sns_snippet}"
-            )
+        sns_query = f"{c_name} {c_addr} instagram facebook line"
+        sns_snippet = search_duckduckgo(sns_query, max_results=5)
 
-        input_data.append(item)
+        item["web_search_results"] = (
+            f"--- [基本検索結果] ---\n{main_snippet}\n\n"
+            f"--- [SNS特化検索結果] ---\n{sns_snippet}"
+        )
 
-    input_json_str = json.dumps(input_data, ensure_ascii=False, indent=2)
+    input_json_str = json.dumps([item], ensure_ascii=False, indent=2)
     return template.replace("{companies_data}", input_json_str)
 
 
 def parse_json_response(
-    raw_text: str, expected_batch: List[Dict[str, str]]
-) -> List[Dict[str, Any]]:
+    raw_text: str, target_company: Dict[str, str], logger: logging.Logger
+) -> Dict[str, Any]:
     """
     LLMからの応答文字列からJSON部分を抽出してパースします。
     パース失敗や件数不足の場合、入力バッチに対応する null 埋めデータを補填します。
@@ -362,30 +409,24 @@ def parse_json_response(
         if cleaned_text:
             parsed_data = json.loads(cleaned_text)
     except json.JSONDecodeError as err:
-        sys.stderr.write(
-            f"[WARN] JSONパース失敗。フォールバックデータ(null)を適用します。"
-            f" エラー: {err}\n"
-        )
+        logger.warning(f"JSONパースに失敗しました: {err}")
 
-    # パースに成功し、正常なリストが得られた場合
     if isinstance(parsed_data, list) and len(parsed_data) > 0:
+        return parsed_data[0]
+    elif isinstance(parsed_data, dict):
         return parsed_data
 
-    # パース失敗時・空文字応答時のフォールバック処理（全項目 null で補填）
-    fallback_results = []
-    for company in expected_batch:
-        fallback_results.append({
-            "company_name": company.get("company_name", "不明"),
-            "official_website": None,
-            "official_email": None,
-            "instagram": None,
-            "facebook": None,
-            "line": None
-        })
-    return fallback_results
+    return {
+        "company_name": target_company.get("company_name", "不明"),
+        "official_website": None,
+        "official_email": None,
+        "instagram": None,
+        "facebook": None,
+        "line": None
+    }
 
 
-def print_results(results: List[Dict[str, Any]]) -> None:
+def print_results(results: List[Dict[str, Any]], logger) -> None:
     """
     抽出した会社情報を標準出力に表示します。
 
@@ -393,16 +434,19 @@ def print_results(results: List[Dict[str, Any]]) -> None:
         results (List[Dict[str, Any]]): 解析済み会社情報リスト
     """
     for idx, item in enumerate(results, start=1):
-        print("=" * 65)
-        print(f"【件数 #{idx}】 会社名: {item.get('company_name', '不明')}")
-        print("-" * 65)
-        print(f"  公式HP URL            : {item.get('official_website') or '未取得'}")
-        print(f"  公式メールアドレス     : {item.get('official_email') or '未取得'}")
-        print(f"  Instagram アカウント  : {item.get('instagram') or '未取得'}")
-        print(f"  Facebook アカウント   : {item.get('facebook') or '未取得'}")
-        print(f"  LINE アカウント       : {item.get('line') or '未取得'}")
-    print("=" * 65)
+        logger.info(f"【件数 #{idx}】 会社名: {item.get('company_name', '不明')}")
+        logger.info("-" * 65)
+        logger.info(f"  公式HP URL            : {item.get('official_website') or '未取得'}")
+        logger.info(f"  公式メールアドレス     : {item.get('official_email') or '未取得'}")
+        logger.info(f"  Instagram アカウント  : {item.get('instagram') or '未取得'}")
+        logger.info(f"  Facebook アカウント   : {item.get('facebook') or '未取得'}")
+        logger.info(f"  LINE アカウント       : {item.get('line') or '未取得'}")
+    logger.info("=" * 65)
 
+
+# ==========================================
+# 6. Main Execution Flow
+# ==========================================
 
 def main() -> None:
     """
@@ -410,83 +454,107 @@ def main() -> None:
     引数パース、設定読み込み、TSV処理、AI呼び出し、結果表示を行います。
     """
     parser = argparse.ArgumentParser(
-        description="会社情報(TSV)からAIを利用してWeb・SNS情報を抽出するツール"
+        description="会社情報(CSV)からAIを利用してWeb・SNS情報を抽出するツール"
     )
-    parser.add_argument(
-        "tsv_file",
-        type=str,
-        help="入力するTAB形式(TSV)ファイルのパス"
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        default="config_v1.ini",
-        help="設定ファイルのパス (デフォルト: config.ini)"
-    )
+    parser.add_argument("--input", type=str, default="input/companies.csv", help="入力するCSVファイルのパス")
+    parser.add_argument("--config", type=str, default="config.ini", help="設定ファイルパス")
     args = parser.parse_args()
 
     # 設定ファイルの読み込み
     if not os.path.exists(args.config):
-        print(f"エラー: 設定ファイル '{args.config}' が見つかりません。", file=sys.stderr)
+        print(f"[ERROR] 設定ファイル '{args.config}' が見つかりません。", file=sys.stderr)
         sys.exit(1)
 
     config = configparser.ConfigParser()
     config.read(args.config, encoding="utf-8")
 
+    # ロガー設定を config.ini より取得
+    log_file_template = config.get("LOG", "log_file_template", fallback="logs/process_{date}.log")
+    console_level_str = config.get("LOG", "console_level", fallback="INFO")
+    file_level_str = config.get("LOG", "file_level", fallback="DEBUG")
+
+    logger = setup_logger(
+        log_file_template=log_file_template,
+        console_level_str=console_level_str,
+        file_level_str=file_level_str
+    )
+
     try:
-        batch_size = config.getint("SETTINGS", "batch_size", fallback=5)
         prompt_template = config.get("PROMPT", "template")
         provider = config.get("LLM", "provider").lower()
+        model_name = config.get("LLM", "model")
         llm_client = LLMFactory.create_client(config)
     except Exception as err:
-        print(f"設定ファイル読み込みエラー: {err}", file=sys.stderr)
+        logger.error(f"設定読み込みエラー: {err}\n{traceback.format_exc()}")
         sys.exit(1)
 
-    # TSVファイルの読み込み
+    # CSVファイルの読み込み
     try:
-        companies = load_tsv_file(args.tsv_file)
+        companies = load_csv_file(args.input, logger)
     except Exception as err:
-        print(f"TSVファイル読み込みエラー: {err}", file=sys.stderr)
+        logger.error(f"CSV読み込みエラー: {err}\n{traceback.format_exc()}")
         sys.exit(1)
 
     if not companies:
-        print("処理対象のデータが存在しません。")
+        logger.info("処理対象のデータが存在しません。")
         sys.exit(0)
 
-    # バッチ処理の実行
-    all_results = []
     total_companies = len(companies)
 
-    for i in range(0, total_companies, batch_size):
-        batch = companies[i: i + batch_size]
-        print(batch)
-        prompt = build_prompt(prompt_template, batch, provider)
+    # 開始ログ出力
+    logger.info("====================================================")
+    logger.info(f"=== 会社情報抽出処理を開始します (対象: 全 {total_companies} 件) ===")
+    logger.info(f"使用AIプロバイダ : {provider}")
+    logger.info(f"使用モデル       : {model_name}")
+    logger.info("====================================================")
+
+    all_results = []
+
+    for idx, company in enumerate(companies, start=1):
+        c_name = company.get("company_name", "名称不明")
+
+        logger.info("----------------------------------------------------")
+        logger.info(f"進捗 [{idx}/{total_companies}] 処理開始: {c_name}")
 
         try:
-            raw_response = llm_client.generate_text(prompt)
-            parsed_batch_results = parse_json_response(raw_response, batch)
-            all_results.extend(parsed_batch_results)
-        except Exception as err:
-            print(
-                f"AI処理中にエラーが発生しました (バッチ {i // batch_size + 1}): {err}",
-                file=sys.stderr
-            )
-            # APIエラー発生時も処理を途中で止めず、nullデータを補填して続行
-            fallback = [
-                {
-                    "company_name": c.get("company_name", "不明"),
-                    "official_website": None,
-                    "official_email": None,
-                    "instagram": None,
-                    "facebook": None,
-                    "line": None
-                }
-                for c in batch
-            ]
-            all_results.extend(fallback)
+            # 1. プロンプト生成
+            prompt = build_prompt(prompt_template, company, provider)
 
-    # 標準出力へ表示
-    print_results(all_results)
+            # 2. リクエストログ (ファイル側が DEBUG などで設定されている場合に詳細記録)
+            logger.debug(f"[{c_name}] --- AI Request Prompt ---\n{prompt}")
+
+            # 3. AI API呼出
+            raw_response = llm_client.generate_text(prompt)
+
+            # 4. レスポンスログ
+            logger.debug(f"[{c_name}] --- AI Raw Response ---\n{raw_response}")
+
+            # 5. 結果のパース
+            parsed_result = parse_json_response(raw_response, company, logger)
+            all_results.append(parsed_result)
+
+            logger.info(f"進捗 [{idx}/{total_companies}] 処理成功: {c_name}")
+
+        except Exception as err:
+            logger.error(
+                f"進捗 [{idx}/{total_companies}] 処理失敗: {c_name} | エラー: {err}\n"
+                f"スタックトレース:\n{traceback.format_exc()}"
+            )
+            fallback = {
+                "company_name": c_name,
+                "official_website": None,
+                "official_email": None,
+                "instagram": None,
+                "facebook": None,
+                "line": None
+            }
+            all_results.append(fallback)
+
+    logger.info("----------------------------------------------------")
+    logger.info(f"=== 全 {total_companies} 件の処理が完了しました ===")
+
+    # 結果をコンソールに表示
+    print_results(all_results, logger)
 
 
 if __name__ == "__main__":
