@@ -1,0 +1,10 @@
+# LLM API Clients
+google-genai>=0.1.0
+anthropic>=0.18.0
+openai>=1.30.0
+
+# Search Tool
+ddgs
+
+# PyInstaller for building standalone executable (.exe)
+pyinstaller>=6.0.0

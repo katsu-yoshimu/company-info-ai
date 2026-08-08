@@ -53,19 +53,19 @@ APIとの連携に必要な認証情報（APIキー等）を設定します。
 
 2. **クレジットカード（クレジット）の設定**
   
-    「Settings」 ＞ 「Billing」 からクレジットカードを登録し、利用枠（クレジット）をチャージしておきます。
+    「クレジット」（または「Credits」） からクレジットカードを登録し、利用枠（クレジット）をチャージしておきます。
 
 3. **API Keys ページへ移動**
 
-    左側メニューまたはダッシュボードから **「API Keys」** を選択します。
+    左側メニューまたはダッシュボードから **「APIキー」（または「API keys」）** を選択します。
 
 4. **APIキーの新規作成**
 
-    **「Create Key」**（または「New Key」）ボタンをクリックし、任意のキー名（例: `My App Key`）を入力してキーを発行します。
+    **「キーを作成」**（または「Create Key」）ボタンをクリックし、任意のキー名（例: `My App Key`）を入力してキーを発行します。
 
 5. **APIキーの保存**
 
-     `sk-ant-` から始まるAPIキーが表示されます。**このキーは一度しか表示されません**ので、画面を閉じる前に必ずコピーして保存してください。
+     `sk-ant-` から始まるAPIキーが表示されます。
 
 ---
 
@@ -81,7 +81,30 @@ APIとの連携に必要な認証情報（APIキー等）を設定します。
 
 3. **APIキーの保存**
 
-    表示された `AIzaSy` から始まるAPIキーをコピーします。
+    表示された `AQ.` から始まるAPIキーをコピーします。
+
+---
+
+#### 【パターン C】 ChatGPT / OpenAI の APIキー作成手順
+
+1. **OpenAI Platform へアクセス・ログイン**  
+
+    [OpenAI Platform (platform.openai.com)](https://platform.openai.com/) にアクセスし、アカウントを登録またはログインします。
+
+2. **クレジットカード（Billing）の設定**  
+
+    「Go to Billing」 ＞ 「Add payment details」 からクレジットカードを登録し、API利用料金の事前チャージ（Add to credit balance）を行っておきます。
+
+3. **API Keys ページへ移動**  
+
+    左メニュー（または右上プロフィールアイコン）から **「API keys」** を選択します。
+
+4. **APIキーの新規作成**  
+
+    **「Create new secret key」** ボタンをクリックし、任意の名前（例: `My App Key`）を入力してキーを発行します。
+
+5. **APIキーの保存**  
+   `sk-` から始まるAPIキーが表示されます。**このキーは一度しか表示されません**ので、必ず安全な場所にコピーして保存してください。
 
 ---
 
@@ -99,9 +122,9 @@ APIとの連携に必要な認証情報（APIキー等）を設定します。
 
     ```ini
     [LLM]
-    provider = anthropic
-    api_key = sk-ant-api03-xxxxxxxxxxxxxxxxxxxxxxxxxxxx
-    model = claude-3-5-sonnet-latest
+    provider = claude
+    api_key = sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    model = claude-sonnet-5
 
     ```
 
@@ -109,9 +132,20 @@ APIとの連携に必要な認証情報（APIキー等）を設定します。
 
     ```ini
     [LLM]
-    provider = google
-    api_key = AIzaSyDxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-    model = gemini-2.5-flash
+    provider = gemini
+    api_key = AQ.xxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    model = gemini-3.6-flash
+
+    ```
+
+
+    **【Gemini を使用する場合の例】**
+
+    ```ini
+    [LLM]
+    provider = chatgpt
+    api_key = sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    model = gpt-4o-mini
 
     ```
 
@@ -129,11 +163,27 @@ APIとの連携に必要な認証情報（APIキー等）を設定します。
 
     処理対象のデータ（CSVファイル、テキストファイルなど）を準備します。
 
-2. **ファイルの配置**
+    【入力ファイルの中身（サンプル例）】
+
+    ```csv
+    company_name,address,phone
+    赤坂デンタルクリニック,東京都港区赤坂3-13-13 赤坂中村ビル3F,03-3585-1548
+    表参道矯正歯科,東京都港区南青山 3-18-17 青山十八番館 5F,
+    恵比寿駅前歯科,東京都渋谷区恵比寿西１－９－６　ＷＥＳＴＣＯ．７Ｆ,
+    代官山デンタルサロン,東京都渋谷区恵比寿西2-20-15ソルティス代官山1F,03-6416-5747
+    恵比寿エスト矯正歯科,東京都渋谷区恵比寿1-20-27 エストエビス2Ｆ,03-6427-8846
+    ```
+
+2. **編集時の注意点**
+
+    * 1行目（ヘッダー行）: システムが項目を特定するために利用するため、編集しないでください（編集不可）。
+    * 2行目以降（データ行）: 実際に情報を抽出・処理したい対象会社のデータを編集・追加・変更してください。
+
+3. **ファイルの配置**
 
     `main.exe` と**同じフォルダ内**に、処理対象ファイルを配置します。
 
-3. **ファイル名の確認・設定**
+4. **ファイル名の確認・設定**
 
    * デフォルトの入力ファイル名（`input/companies.csv`）に合わせるか、引数で入力ファイル名の指定がある場合はそちらのパスに合わせて配置してください。
 
@@ -145,7 +195,7 @@ APIとの連携に必要な認証情報（APIキー等）を設定します。
 
 1. `main.exe` をダブルクリックして起動します。
 2. コマンドプロンプト画面（黒いウィンドウ）が開き、処理が開始されます。
-3. 処理完了メッセージが表示され、画面が閉じる（またはキー入力待ちになる）まで待ちます。
+3. 処理完了後、自動でウィンドウが閉じないように `Enter` キー入力待ちになります。
 
 ### パターン B: コマンドプロンプトから起動（推奨）
 
@@ -153,13 +203,36 @@ APIとの連携に必要な認証情報（APIキー等）を設定します。
 
 1. エクスプローラーのアドレスバーに `cmd` と入力して `Enter` キーを押します。（現在フォルダでコマンドプロンプトが開きます）
 
-2. 以下のコマンドを入力して実行します。
+2. ヘルプを表示する場合は以下のコマンドを実行します。
 
     ```bat
-    main.exe --input input/companies.csv
+    main.exe -h
     ```
 
-3. 実行ログがリアルタイムで画面上に表示されます。
+    【実行結果（ヘルプメッセージ）】
+
+    ```bat
+    usage: main.exe [-h] [--input INPUT] [--config CONFIG]
+
+    会社情報(CSV)からAIを利用してWeb・SNS情報を抽出するツール
+
+    options:
+    -h, --help            show this help message and exit
+    -input INPUT          入力するCSVファイルのパス
+    --config CONFIG        設定ファイルパス
+    ```
+
+3. 通常実行（デフォルト）する場合は、以下のコマンドを入力して実行します。
+
+    ```bat
+    main.exe
+    ```
+
+4. 引数を指定して実行する場合は、以下のように入力します。
+
+    ```bat
+    main.exe --input custom_input.csv --config custom_config.ini
+    ```
 
 ---
 
@@ -185,3 +258,8 @@ APIとの連携に必要な認証情報（APIキー等）を設定します。
 
     * **「API Key not found」等のエラー**: `config.ini` の `api_key` が正しく入力されているか確認してください。
     * **「File not found」等のエラー**: 入力ファイルが `main.exe` と同じ階層に置かれているか、ファイル名が正しいか確認してください。
+
+## 7. 参考:AI モデル claude-sonnet-5 のサンプルの5件の実行
+
+  * 実行時間： 1分14秒÷5件＝14.8秒/件
+  * 利用料金： $0.03×160円÷5件＝0.96円/件

@@ -434,6 +434,7 @@ def print_results(results: List[Dict[str, Any]], logger) -> None:
         results (List[Dict[str, Any]]): 解析済み会社情報リスト
     """
     for idx, item in enumerate(results, start=1):
+        logger.info("-" * 65)
         logger.info(f"【件数 #{idx}】 会社名: {item.get('company_name', '不明')}")
         logger.info("-" * 65)
         logger.info(f"  公式HP URL            : {item.get('official_website') or '未取得'}")
@@ -555,6 +556,9 @@ def main() -> None:
 
     # 結果をコンソールに表示
     print_results(all_results, logger)
+
+    # 処理終了後にウィンドウが即座に閉じないようEnterキー入力を待つ
+    input("処理が完了しました。[Enter] キーを押して終了してください...")
 
 
 if __name__ == "__main__":

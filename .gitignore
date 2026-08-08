@@ -28,6 +28,7 @@ Thumbs.db
 build/
 dist/
 *.egg-info/
+*.spec
 
 # pytest
 .pytest_cache/
